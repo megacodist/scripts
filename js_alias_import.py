@@ -5,9 +5,10 @@
 #
 
 import argparse
+import datetime
 from functools import partial
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 from re import Match, Pattern
 import sys
@@ -15,7 +16,11 @@ from typing import Iterable, Mapping
 
 
 class STRS:
-    APP_DESCR = 'Replace aliases in absolute import statements with provided paths.'
+    DEV = 'Megacodist'
+    APP_NAME = f'{DEV} JS Alias Import Replacer'
+    VERSION = f'{APP_NAME} v1.1.0'
+    COPYWRITE = '@2021-{year} {dev}. This app is available under MIT License.'
+    APP_DESCR = 'Replace aliases in absolute import-from statements with provided paths.'
     DIR_HELP = 'Directory to look for files, defaults to the current directory.'
     NO_SUB_DIRS_HELP = "Do not process subdirectories (default: process subdirectories)"
     EXTS_HELP = 'Space-separated list of file extensions to process like js or "js ts". It is default to `js` files.'
@@ -26,21 +31,22 @@ class STRS:
     CONFR = 'Enter Y to apply changes:'
     USER_CANCELED = 'Operation cancelled by user.'
     DUP_ALIASES = 'Duplicate alias `{}` found. Aliases must be unique.'
-    FINDING_IMPORT_ALAIASES = 'Finding import aliases in {}...'
-    REPLACEMENTS_REPORTS = 'Changes in {}:'
+    SEARCHING_IMPORT_FROM_ALAIAS = '>> Searching for import-from alias in "{}"...'
+    REQ_REPLACEMENTS = 'Requested replacements:'
+    REPLACEMENTS_REPORTS = 'Changes in "{}":'
     REPLACEMENT = '\t{} -> {}'
 
 
-_PATTERN = r'''
-    import
-    \s+.*?\s+
-    from
+_IMPORT_FROM_ALIAS_PATT = r'''
+    \bimport\b
     \s+
-    ['"]
-    (?P<alias>{aliases})
-    /                     # Alias should be at the start of the path
-    (?P<relPath>.*?)      # Capturing the relative path
-    ['"]
+    (?P<stuff>(?:(?!\s+from\b).)*?) # Capturing anything but not `from`
+    \s+from\b
+    \s+
+    (['"])                     # Capturing the opening quote
+    (?P<alias>{aliases})       # Capturing the alias
+    (?P<relPath>(?:/[^'"]+)+?) # Capturing the relative path
+    \2                         # Matching the closing quote
 '''
 
 def replaceMatch(
@@ -48,26 +54,31 @@ def replaceMatch(
         mp_alias_path: Mapping[str, str],
         match: Match[str],
         ) -> str:
-    fullMatch = match.group(0)
-    # Changing the alias...
+    # Reading parts of the import-from statement...
+    stuff = match.group('stuff')
     alias = match.group('alias')
+    relPath = match.group('relPath')
+    quote = match.group(2)
+    # Checking if the alias is in the mapping...
     try:
-        path = mp_alias_path[alias]
+        pthAlias = PurePosixPath(mp_alias_path[alias])
     except KeyError:
-        # Doing nothing if alias is not present in tha mapping...
-        return fullMatch
-    fullMatch = fullMatch.replace(alias, path)
-    changes.append(alias)
-    # Changing the relative path...
-    relPath = Path(match.group('relPath'))
-    if relPath.suffix.lower() not in _KNOWN_EXTS:
-        newRelPath = relPath.with_suffix('.js')
-        fullMatch = fullMatch.replace(str(relPath), str(newRelPath))
-    return fullMatch
+        # Doing nothing bacause alias is not present in tha mapping...
+        return match.group(0)
+    else:
+        changes.append(alias)
+    # Changing the alias & the relPath...
+    alias = str(pthAlias)
+    pthRelPath = PurePosixPath(relPath)
+    if pthRelPath.suffix.lower() not in _KNOWN_EXTS:
+        pthRelPath = pthRelPath.with_suffix('.js')
+    relPath = str(pthRelPath)
+    # Returning the updated import-from statement...
+    return f'import {stuff} from {quote}{alias}{relPath}{quote}'
 
 
 _KNOWN_EXTS = ['.json', '.js']
-"""Known extensions that should not be changes."""
+"""Known extensions that should not be changed."""
 
 
 def _searchFiles(
@@ -82,9 +93,9 @@ def _searchFiles(
     in `replacements`.
     """
     # Declaring variables...
-    global _PATTERN
+    global _IMPORT_FROM_ALIAS_PATT
     aliases = '|'.join(map(re.escape, mp_alias_path.keys()))
-    pattern = _PATTERN.format(aliases=aliases)
+    pattern = _IMPORT_FROM_ALIAS_PATT.format(aliases=aliases)
     regex = re.compile(pattern, re.DOTALL | re.VERBOSE)
     # Searching the directory...
     pthDir = Path(dir)
@@ -106,8 +117,7 @@ def _replaceAliases(
     changes = list[str]()
     replacer = partial(replaceMatch, changes, mp_alias_path)
     # Prompting the user...
-    print(file)
-    msg = STRS.FINDING_IMPORT_ALAIASES.format(file)
+    msg = STRS.SEARCHING_IMPORT_FROM_ALAIAS.format(file)
     sys.stdout.write(msg)
     sys.stdout.flush()
     # Finding import aliases & replacing them...
@@ -127,7 +137,16 @@ def _replaceAliases(
 def main():
     # Defining flags...
     parser = argparse.ArgumentParser(
-        description=STRS.APP_DESCR,)
+        prog=STRS.APP_NAME,
+        description=STRS.APP_DESCR,
+        epilog=STRS.COPYWRITE.format(
+            year=datetime.date.today().year,
+            dev=STRS.DEV))
+    parser.add_argument(
+        '-v',
+        '--version',
+        action='version',
+        version=STRS.VERSION)
     parser.add_argument(
         '--dir',
         default=os.getcwd(),
@@ -173,7 +192,7 @@ def main():
     msg = STRS.EXTS_PRMPT.format(', '.join(extensions))
     print(msg)
     # Prompting `replacements`...
-    print('Replacements:')
+    print(STRS.REQ_REPLACEMENTS)
     for alias, path in mpAliasPath.items():
         print(STRS.REPLACEMENT.format(alias, path))
     # Prompting user for confirmation...
