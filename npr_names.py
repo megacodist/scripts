@@ -2,9 +2,9 @@
 #
 #
 
+from abc import ABC, abstractmethod
 from datetime import datetime
 import enum
-from functools import lru_cache
 from pathlib import Path
 import re
 import signal
@@ -26,15 +26,49 @@ class _STRS:
     BAD_NPR_NAME = '\t🞩 {stem}: {reason}'
 
 
+class _NprNameErrs(enum.IntFlag):
+    OK = 0x00
+    """The name is well-formed."""
+    NO_DATE = 0x01
+    """8-digit date not found"""
+    INVALID_DATE = 0x02
+    """8-digit date is not valid"""
+    BAD_SLUG = 0x04
+    """The podcast name is not a well-formed slug."""
+
+
+class ISlugSplitter(ABC):
+    @abstractmethod
+    def split(self, text: str) -> list[str]:
+        pass
+
+
+class HyphDashSplitter(ISlugSplitter):
+    def split(self, text: str) -> list[str]:
+        return re.split(r"[_-]+", text)
+
+
+class AgressiveSplitter(ISlugSplitter):
+    def split(self, text: str) -> list[str]:
+        return re.split(r"(?:_|\W)+", text)
+
+
 class _NprNameParts:
-    def __init__(self) -> None:
+    def __init__(self, name: str) -> None:
         self._parts = list[str]()
         self._dateIdx: int | None = None
+        self._errors: _NprNameErrs = _NprNameErrs.OK
+        self._parse(name)
     
     @property
     def dateIdx(self) -> int | None:
         """Gets the index of date field."""
         return self._dateIdx
+    
+    @property
+    def errors(self) -> _NprNameErrs:
+        """Gets errors found during parsing the name."""
+        return self._errors
     
     def __iter__(self) -> Iterable[str]:
         return iter(self._parts)
@@ -55,17 +89,38 @@ class _NprNameParts:
     
     def __getitem__(self, index: int | slice) -> str | list[str]:
         return self._parts[index]
+    
+    def _parse(self, name: str) -> None:
+        """Parses the slugified name into its parts and returns the parts if
+        the name is valid otherwise returns `None`. If the parse process is
+        successful, it also finds the position of the date field in the parts
+        of the name.
+        """
+        badSlugMatch = _badSlugPatt.search(name)
+        if badSlugMatch is None:
+            self._parts = HyphDashSplitter().split(name)
+        else:
+            self._parts = AgressiveSplitter().split(name)
+            self._errors |= _NprNameErrs.BAD_SLUG
+        # Finding date...
+        for i, part in enumerate(self._parts):
+            if len(part) == 8:
+                self._dateIdx = i
+                break
+        # Setting date-related flags...
+        if self._dateIdx is None:
+            self._errors |= _NprNameErrs.NO_DATE
+        elif not self._is8Date(self._parts[self._dateIdx]):
+            self._errors |= _NprNameErrs.INVALID_DATE
 
 
-class _NprNameErrs(enum.IntEnum):
-    NO_DATE = 1
-    """8-digit date not found"""
-    INVALID_DATE = 2
-    """8-digit date is not valid"""
-    UNSLUGIFIED_POD_NAME = 3
-    """The podcast name is not slugified well."""
-    OBSCURE_POD_NAME = 4
-    """The podcast name is not clear."""
+    def _is8Date(self, date: str) -> bool:
+        """Checks if the date string is in the format of YYYYMMDD."""
+        try:
+            datetime.strptime(date, "%Y%m%d")
+        except ValueError:
+            return False
+        return True
 
 
 _quitReq = False
@@ -74,65 +129,16 @@ _quitReq = False
 _AUDIO_EXTS: Iterable[str] = ['.mp3', '.m4a',]
 
 
-_SLUG_REGEX = r'([a-z0-9]+{delimiter}*)+'
-
-_NPR_NAME_REGEX = r"""
-    ^
-    (?P<podName>.*?)
-    (?P<date>\d{8})
-    (?P<description>.*)
-    $
+_BAD_SLUG_REGEX = r'[^-\w]'
+"""The regex which recognizes bad characters in a slugified name, that is
+any character other than hyphen, underscore, or alphanumeric characters.
 """
-_NPR_NAME_PATT = re.compile(_NPR_NAME_REGEX, re.VERBOSE)
-
-
-@lru_cache(maxsize=128) 
-def _getSlugPatt(delimiter: str) -> re.Pattern[str]:
-    """Gets the `re` pattern for the specified delimiter. This API offload
-    the client code of managing and caching the patters.
-    """
-    escDelim = re.escape(delimiter)
-    regex = _SLUG_REGEX.format(delimiter=escDelim)
-    return re.compile(regex)
-
-
-def _nameToParts(name: str) -> _NprNameParts | None:
-    """Parses the slugified name into its parts and returns the parts if
-    the name is valid otherwise returns `None`. If the parse process is
-    successful, it also finds the position of the date field in the parts
-    of the name.
-    """
-    parts = None
-    match_ = _getSlugPatt('_').fullmatch(name)
-    if match_:
-        parts = _NprNameParts()
-        parts._parts = list(filter(None, name.split('_')))
-    else:
-        match_ = _getSlugPatt('-').fullmatch(name)
-        if match_:
-            parts = _NprNameParts()
-            parts._parts = list(filter(None, name.split('-')))
-    if parts is None:
-        return None
-    # Finding date...
-    for i, part in enumerate(parts._parts):
-        if len(part) == 8 and part.isdigit():
-            parts._dateIdx = i
-            break
-    return parts
-
-
-def _is8Date(date: str) -> bool:
-    """Checks if the date string is in the format of YYYYMMDD."""
-    try:
-        datetime.strptime(date, "%Y%m%d")
-    except ValueError:
-        return False
-    return True
+_badSlugPatt = re.compile(_BAD_SLUG_REGEX)
+"""The pattern to find texts that are NOT well-formed slugified names."""
 
 
 def _normalizeNprFileName(name: str) -> str | _NprNameErrs:
-    parts = _nameToParts(name)
+    parts = _NprNameParts(name)
     if parts is None:
         return _NprNameErrs.UNSLUGIFIED_POD_NAME
     # Checking date field existence...

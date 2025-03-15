@@ -38,10 +38,10 @@ class STRS:
 
 
 _IMPORT_FROM_ALIAS_PATT = r'''
-    \bimport\b
+    \bimport\b  # Capturing `import` word as a whole not in cases like `important`
     \s+
     (?P<stuff>(?:(?!\s+from\b).)*?) # Capturing anything but not `from`
-    \s+from\b
+    \s+from\b   # Capturing `from` word as a whole & its preceding whitespace
     \s+
     (['"])                     # Capturing the opening quote
     (?P<alias>{aliases})       # Capturing the alias
